@@ -520,8 +520,8 @@ $domainPanel.Controls.Add($progressBar)
 # Query status label - shows elapsed time during queries, positioned left of progress bar
 $queryStatusLabel = New-Object System.Windows.Forms.Label
 $queryStatusLabel.Text = ""
-$queryStatusLabel.Location = New-Object System.Drawing.Point(860, 5)
-$queryStatusLabel.Size = New-Object System.Drawing.Size(155, 18)
+$queryStatusLabel.Location = New-Object System.Drawing.Point(780, 5)
+$queryStatusLabel.Size = New-Object System.Drawing.Size(235, 18)
 $queryStatusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
 $queryStatusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
 $queryStatusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
@@ -1365,24 +1365,46 @@ function Get-LockedOutUsersAsync {
     $script:queryStartTime = Get-Date
     Update-Status "Querying Main DC..." "Orange"
     $script:cancelRequested = $false
-    
+
+    # Synchronized hashtable for progress reporting
+    $script:queryProgress = [hashtable]::Synchronized(@{
+        Phase = "Searching"
+        TotalUsers = 0
+        TotalBatches = 0
+        CurrentBatch = 0
+        BatchTimeout = 0
+        BatchStartTime = $null
+    })
+
     Cleanup-AsyncResources
-    
+
     $script:runspace = [runspacefactory]::CreateRunspace()
     $script:runspace.ApartmentState = "STA"
     $script:runspace.ThreadOptions = "ReuseThread"
     $script:runspace.Open()
+    $script:runspace.SessionStateProxy.SetVariable("Progress", $script:queryProgress)
     $script:powershell = [powershell]::Create()
     $script:powershell.Runspace = $script:runspace
     [void]$script:powershell.AddScript({
         Import-Module ActiveDirectory -ErrorAction Stop
         $pdc = (Get-ADDomain).PDCEmulator
+        $Progress.Phase = "Searching locked users..."
         # Use Search-ADAccount for reliable lockout detection, then batch parallel get properties (5 at a time)
         $lockedSamNames = @(Search-ADAccount -LockedOut -Server $pdc | Select-Object -ExpandProperty SamAccountName)
         $lockedUsers = @()
         if ($lockedSamNames.Count -gt 0) {
             $batchSize = 5
+            $totalBatches = [Math]::Ceiling($lockedSamNames.Count / $batchSize)
+            $Progress.TotalUsers = $lockedSamNames.Count
+            $Progress.TotalBatches = $totalBatches
+            $Progress.Phase = "Fetching details"
+
             for ($i = 0; $i -lt $lockedSamNames.Count; $i += $batchSize) {
+                $currentBatch = [Math]::Floor($i / $batchSize) + 1
+                $Progress.CurrentBatch = $currentBatch
+                $Progress.BatchTimeout = 60
+                $Progress.BatchStartTime = [DateTime]::Now
+
                 $batch = $lockedSamNames[$i..([Math]::Min($i + $batchSize - 1, $lockedSamNames.Count - 1))]
                 $pool = [runspacefactory]::CreateRunspacePool(1, $batch.Count)
                 $pool.Open()
@@ -1401,6 +1423,8 @@ function Get-LockedOutUsersAsync {
                 $timeout = [DateTime]::Now.AddSeconds(60)
                 $allCompleted = $false
                 while ([DateTime]::Now -lt $timeout) {
+                    $remaining = ($timeout - [DateTime]::Now).TotalSeconds
+                    $Progress.BatchTimeout = [Math]::Max(0, [int]$remaining)
                     $allCompleted = ($jobs | Where-Object { -not $_.Handle.IsCompleted }).Count -eq 0
                     if ($allCompleted) { break }
                     Start-Sleep -Milliseconds 100
@@ -1419,6 +1443,8 @@ function Get-LockedOutUsersAsync {
                 $pool.Close()
                 $pool.Dispose()
             }
+        } else {
+            $Progress.Phase = "No locked users"
         }
         $results = @()
         foreach ($user in $lockedUsers) {
@@ -1569,7 +1595,15 @@ $timer.Add_Tick({
         $elapsed = (Get-Date) - $script:queryStartTime
         $elapsedStr = "{0:D2}:{1:D2}" -f [int]$elapsed.TotalMinutes, $elapsed.Seconds
         $statusText = switch ($timer.Tag) {
-            "LockedUsers" { "Main DC... ($elapsedStr)" }
+            "LockedUsers" {
+                if ($script:queryProgress -and $script:queryProgress.TotalBatches -gt 0) {
+                    "$($script:queryProgress.CurrentBatch)/$($script:queryProgress.TotalBatches) T-$($script:queryProgress.BatchTimeout)s ($elapsedStr)"
+                } elseif ($script:queryProgress -and $script:queryProgress.Phase) {
+                    "$($script:queryProgress.Phase) ($elapsedStr)"
+                } else {
+                    "Main DC... ($elapsedStr)"
+                }
+            }
             "LockedUsersAllDCs" { "All DCs... ($elapsedStr)" }
             "LockoutSource" { "DC status... ($elapsedStr)" }
             default { "Processing... ($elapsedStr)" }
