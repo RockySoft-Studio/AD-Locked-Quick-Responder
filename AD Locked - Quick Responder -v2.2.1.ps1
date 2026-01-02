@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    AD Locked - Quick Responder v2.1.8
+    AD Locked - Quick Responder v2.2.1
 .DESCRIPTION
     Provides a GUI to query all locked user accounts with auto-refresh, sound alerts, 
     TTS notifications, auto-unlock, filtering, and RDS source identification.
@@ -69,7 +69,7 @@ if (-not $script:useModernTTS) {
 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "AD Locked - Quick Responder v2.1.8"
+$form.Text = "AD Locked - Quick Responder v2.2.1"
 $form.Size = New-Object System.Drawing.Size(1250, 975)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
@@ -132,14 +132,16 @@ $form.Controls.Add($infoButton)
 
 $infoButton.Add_Click({
     $changelogText = @"
-AD Locked - Quick Responder v2.1.8
+AD Locked - Quick Responder v2.2.1
 
-=== v2.1.8 (Current) ===
+=== v2.2.1 (Current) ===
+- Added permission detection: Unlock controls disabled with tooltip when user lacks privileges
+- Status bar shows warning when unlock functions are unavailable
 - Parallel DC queries - significantly faster "Query from All DCs"
 - Removed event log queries (Get-WinEvent) - simplified DC status display
 - Fixed: All queries now explicitly target PDC for consistent BadLogonCount
 - Fixed: Unlock operations now target PDC for consistency
-- Code cleanup and performance improvements
+- Removed slow operation warning for single-user DC query (no longer needed)
 
 === v2.1.2 ===
 - Added Windows 11 Natural Voice TTS support (auto fallback to legacy on Win10)
@@ -702,6 +704,13 @@ $script:nextRefreshTime = $null
 $script:autoUnlockQueue = @{}
 $script:notifiedUpcoming = @{}
 $script:dcDataLoaded = $false
+$script:hasUnlockPermission = $false
+
+# ToolTip for permission warnings
+$script:toolTip = New-Object System.Windows.Forms.ToolTip
+$script:toolTip.InitialDelay = 300
+$script:toolTip.ReshowDelay = 100
+$script:toolTip.AutoPopDelay = 5000
 
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000
@@ -892,14 +901,80 @@ function Get-BadLogonCountThreshold {
     }
 }
 
+function Test-UnlockPermission {
+    try {
+        # Check if current user is member of groups that typically have unlock permission
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object System.Security.Principal.WindowsPrincipal($currentUser)
+
+        # Check for Domain Admins, Account Operators, or local Administrators
+        $isDomainAdmin = $principal.IsInRole("Domain Admins")
+        $isAccountOperator = $principal.IsInRole("Account Operators")
+        $isAdmin = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+
+        if ($isDomainAdmin -or $isAccountOperator -or $isAdmin) {
+            return $true
+        }
+
+        # Additional check: try to get AD permissions (more accurate but slower)
+        try {
+            $domain = Get-ADDomain
+            $currentUserSID = $currentUser.User.Value
+            # If we can query domain, check if user has any elevated AD role
+            $user = Get-ADUser -Identity $currentUser.Name -Properties MemberOf -ErrorAction SilentlyContinue
+            if ($user) {
+                $groups = $user.MemberOf | ForEach-Object { (Get-ADGroup $_).Name }
+                $unlockGroups = @("Domain Admins", "Account Operators", "Enterprise Admins", "Administrators")
+                foreach ($group in $unlockGroups) {
+                    if ($groups -contains $group) { return $true }
+                }
+            }
+        } catch { }
+
+        return $false
+    } catch {
+        return $false
+    }
+}
+
+function Set-UnlockControlsState {
+    $noPermissionTip = "Insufficient permissions: You need Domain Admin or Account Operator privileges to unlock accounts"
+
+    if ($script:hasUnlockPermission) {
+        $unlockButton.Enabled = $true
+        $unlockMenuItem.Enabled = $true
+        $unlockButton.BackColor = [System.Drawing.Color]::FromArgb(200, 80, 0)
+        $script:toolTip.SetToolTip($unlockButton, "")
+    } else {
+        $unlockButton.Enabled = $false
+        $unlockMenuItem.Enabled = $false
+        $unlockButton.BackColor = [System.Drawing.Color]::LightGray
+        $unlockButton.FlatAppearance.BorderColor = [System.Drawing.Color]::DarkGray
+        $script:toolTip.SetToolTip($unlockButton, $noPermissionTip)
+    }
+}
+
 function Enable-AutoUnlockControls {
-    if ($script:dcDataLoaded) {
+    if ($script:dcDataLoaded -and $script:hasUnlockPermission) {
         $autoUnlockCheckbox.Enabled = $true
         $autoUnlockDelayCombo.Enabled = $true
         $lastLogonDaysCombo.Enabled = $true
         $badLogonCountCombo.Enabled = $true
         $ttsUpcomingUnlockCheckbox.Enabled = $true
         $ttsUnlockedCheckbox.Enabled = $true
+        $script:toolTip.SetToolTip($autoUnlockCheckbox, "")
+    } elseif ($script:dcDataLoaded -and -not $script:hasUnlockPermission) {
+        $noPermissionTip = "Insufficient permissions: You need Domain Admin or Account Operator privileges to unlock accounts"
+        $autoUnlockCheckbox.Enabled = $false
+        $autoUnlockDelayCombo.Enabled = $false
+        $lastLogonDaysCombo.Enabled = $false
+        $badLogonCountCombo.Enabled = $false
+        $ttsUpcomingUnlockCheckbox.Enabled = $false
+        $ttsUnlockedCheckbox.Enabled = $false
+        $script:toolTip.SetToolTip($autoUnlockCheckbox, $noPermissionTip)
+        $script:toolTip.SetToolTip($autoUnlockDelayCombo, $noPermissionTip)
+        $script:toolTip.SetToolTip($lastLogonDaysCombo, $noPermissionTip)
+        $script:toolTip.SetToolTip($badLogonCountCombo, $noPermissionTip)
     }
 }
 
@@ -1156,7 +1231,9 @@ function Set-UIState {
     $refreshButton.Enabled = -not $IsQuerying
     $exportButton.Enabled = -not $IsQuerying
     $queryAllDCButton.Enabled = -not $IsQuerying
-    $unlockButton.Enabled = -not $IsQuerying
+    # Unlock button respects both query state and permission
+    $unlockButton.Enabled = (-not $IsQuerying) -and $script:hasUnlockPermission
+    $unlockMenuItem.Enabled = (-not $IsQuerying) -and $script:hasUnlockPermission
     $queryLockoutSourceButton.Enabled = -not $IsQuerying
     $cancelButton.Enabled = $IsQuerying
     $progressBar.Visible = $IsQuerying
@@ -1411,8 +1488,14 @@ $timer.Add_Tick({
             $result = $script:powershell.EndInvoke($script:asyncResult)
             switch ($timer.Tag) {
                 "DomainInfo" {
-                    if ($result) { 
-                        $domainLabel.Text = "Domain: $($result.DNSRoot) | Primary DC: $($result.PDCEmulator)"
+                    if ($result) {
+                        if ($script:hasUnlockPermission) {
+                            $domainLabel.Text = "Domain: $($result.DNSRoot) | Primary DC: $($result.PDCEmulator)"
+                            $domainLabel.ForeColor = [System.Drawing.Color]::Black
+                        } else {
+                            $domainLabel.Text = "Domain: $($result.DNSRoot) | PDC: $($result.PDCEmulator) | Unlock disabled (no permission)"
+                            $domainLabel.ForeColor = [System.Drawing.Color]::OrangeRed
+                        }
                         $script:dcDataLoaded = $true
                         Enable-AutoUnlockControls
                     }
@@ -1758,6 +1841,9 @@ $copyAllButton.Add_Click({
 })
 
 $form.Add_Shown({
+    # Check unlock permission first
+    $script:hasUnlockPermission = Test-UnlockPermission
+
     # Ensure auto-unlock controls are disabled until DC info is loaded
     $autoUnlockCheckbox.Enabled = $false
     $autoUnlockDelayCombo.Enabled = $false
@@ -1766,6 +1852,16 @@ $form.Add_Shown({
     $ttsUpcomingUnlockCheckbox.Enabled = $false
     $ttsUnlockedCheckbox.Enabled = $false
     $script:dcDataLoaded = $false
+
+    # Set unlock button state based on permission
+    Set-UnlockControlsState
+
+    # Show warning if no permission
+    if (-not $script:hasUnlockPermission) {
+        $domainLabel.Text = "Domain: Loading... | WARNING: Unlock functions disabled (insufficient permissions)"
+        $domainLabel.ForeColor = [System.Drawing.Color]::OrangeRed
+    }
+
     Get-DomainInfoAsync
 })
 
