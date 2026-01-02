@@ -149,8 +149,8 @@ This means "10 days" = any time within the last 10 calendar days.
 ## Version History
 
 ### v2.2.8 (Current)
-- Added elapsed time display during queries (e.g., "Querying Main DC... (00:05)")
-- Fixed: Elapsed time now updates every 0.5 seconds (was 5 seconds - too slow to notice)
+- Added elapsed time display above progress bar during queries (e.g., "Main DC... (00:05)")
+- Elapsed time updates every 1 second for responsive feedback
 - Batch parallel query: Main DC query processes 5 users at a time (safer for server)
 - Added 60-second timeout per batch to prevent hanging
 - Batch must complete or terminate before next batch starts (prevents server overload)

@@ -135,8 +135,8 @@ $infoButton.Add_Click({
 AD Locked - Quick Responder v2.2.8
 
 === v2.2.8 (Current) ===
-- Added elapsed time display during queries (e.g., "Querying Main DC... (00:05)")
-- Fixed: Elapsed time now updates every 0.5 seconds (was 5 seconds - too slow to notice)
+- Added elapsed time display above progress bar during queries (e.g., "Main DC... (00:05)")
+- Elapsed time updates every 1 second for responsive feedback
 - Batch parallel query: Main DC query processes 5 users at a time (safer for server)
 - Added 60-second timeout per batch to prevent hanging
 - Batch must complete or terminate before next batch starts (prevents server overload)
@@ -517,6 +517,17 @@ $progressBar.MarqueeAnimationSpeed = 30
 $progressBar.Visible = $false
 $domainPanel.Controls.Add($progressBar)
 
+# Query status label - shows elapsed time during queries, positioned above domainPanel
+$queryStatusLabel = New-Object System.Windows.Forms.Label
+$queryStatusLabel.Text = ""
+$queryStatusLabel.Location = New-Object System.Drawing.Point(1020, 888)
+$queryStatusLabel.Size = New-Object System.Drawing.Size(195, 18)
+$queryStatusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+$queryStatusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
+$queryStatusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$queryStatusLabel.Visible = $false
+$form.Controls.Add($queryStatusLabel)
+
 # Separator above Locked Users
 $separator4 = New-Object System.Windows.Forms.Label
 $separator4.Location = New-Object System.Drawing.Point(20, 321)
@@ -720,7 +731,7 @@ $script:toolTip.ReshowDelay = 100
 $script:toolTip.AutoPopDelay = 5000
 
 $timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 500  # Fast polling for responsive elapsed time display during queries
+$timer.Interval = 1000  # 1 second for responsive elapsed time display
 
 $autoRefreshTimer = New-Object System.Windows.Forms.Timer
 
@@ -1262,7 +1273,8 @@ function Set-UIState {
     $queryLockoutSourceButton.Enabled = -not $IsQuerying
     $cancelButton.Enabled = $IsQuerying
     $progressBar.Visible = $IsQuerying
-    $statusLabel.Visible = -not $IsQuerying
+    $queryStatusLabel.Visible = $IsQuerying
+    if (-not $IsQuerying) { $queryStatusLabel.Text = "" }
     $form.Cursor = if ($IsQuerying) { [System.Windows.Forms.Cursors]::AppStarting } else { [System.Windows.Forms.Cursors]::Default }
 
     # Pause/resume auto-refresh during query
@@ -1551,17 +1563,17 @@ $timer.Add_Tick({
     if ($script:isClosing) { $timer.Stop(); return }
     if ($null -eq $script:asyncResult) { return }
 
-    # Show elapsed time while query is running
+    # Show elapsed time while query is running (in separate label above progress bar)
     if (-not $script:asyncResult.IsCompleted -and $script:queryStartTime) {
         $elapsed = (Get-Date) - $script:queryStartTime
         $elapsedStr = "{0:D2}:{1:D2}" -f [int]$elapsed.TotalMinutes, $elapsed.Seconds
         $statusText = switch ($timer.Tag) {
-            "LockedUsers" { "Querying Main DC... ($elapsedStr)" }
-            "LockedUsersAllDCs" { "Querying All DCs... ($elapsedStr)" }
-            "LockoutSource" { "Querying DC status... ($elapsedStr)" }
+            "LockedUsers" { "Main DC... ($elapsedStr)" }
+            "LockedUsersAllDCs" { "All DCs... ($elapsedStr)" }
+            "LockoutSource" { "DC status... ($elapsedStr)" }
             default { "Processing... ($elapsedStr)" }
         }
-        Update-Status $statusText "Orange"
+        $queryStatusLabel.Text = $statusText
     }
 
     if ($script:asyncResult.IsCompleted) {
