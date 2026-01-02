@@ -136,7 +136,7 @@ AD Locked - Quick Responder v2.2.8
 
 === v2.2.8 (Current) ===
 - Added elapsed time display above progress bar during queries (e.g., "Main DC... (00:05)")
-- Elapsed time updates every 1 second for responsive feedback
+- Elapsed time updates every 2.5 seconds
 - Batch parallel query: Main DC query processes 5 users at a time (safer for server)
 - Added 60-second timeout per batch to prevent hanging
 - Batch must complete or terminate before next batch starts (prevents server overload)
@@ -520,8 +520,8 @@ $domainPanel.Controls.Add($progressBar)
 # Query status label - shows elapsed time during queries, positioned above domainPanel
 $queryStatusLabel = New-Object System.Windows.Forms.Label
 $queryStatusLabel.Text = ""
-$queryStatusLabel.Location = New-Object System.Drawing.Point(1020, 888)
-$queryStatusLabel.Size = New-Object System.Drawing.Size(195, 18)
+$queryStatusLabel.Location = New-Object System.Drawing.Point(900, 888)
+$queryStatusLabel.Size = New-Object System.Drawing.Size(315, 18)
 $queryStatusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
 $queryStatusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
 $queryStatusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
@@ -731,7 +731,7 @@ $script:toolTip.ReshowDelay = 100
 $script:toolTip.AutoPopDelay = 5000
 
 $timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 1000  # 1 second for responsive elapsed time display
+$timer.Interval = 2500  # 2.5 seconds for elapsed time display
 
 $autoRefreshTimer = New-Object System.Windows.Forms.Timer
 
