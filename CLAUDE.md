@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AD Locked - Quick Responder v2.2.8 is a PowerShell-based Windows Forms GUI application for IT administrators to monitor and manage Active Directory locked user accounts. Built for Thundermist Health Center IT Team.
+AD Locked - Quick Responder v2.3.0 is a PowerShell-based Windows Forms GUI application for IT administrators to monitor and manage Active Directory locked user accounts. Built for Thundermist Health Center IT Team.
 
 **GitHub**: https://github.com/RockySoft-Studio/AD-Locked-Quick-Responder
 
@@ -148,8 +148,15 @@ This means "10 days" = any time within the last 10 calendar days.
 
 ## Version History
 
-### v2.2.8 (Current)
-- Added elapsed time display above progress bar during queries (e.g., "Main DC... (00:05)")
+### v2.3.0 (Current)
+- Detailed query progress display with batch info
+  - Shows "Searching locked users..." during initial search
+  - Shows "2/5 T-45s (00:12)" during batch processing
+- Progress display moved to left of progress bar in status panel
+- Scrollable changelog window
+
+### v2.2.8
+- Added elapsed time display during queries
 - Elapsed time updates every 2.5 seconds
 - Batch parallel query: Main DC query processes 5 users at a time (safer for server)
 - Added 60-second timeout per batch to prevent hanging

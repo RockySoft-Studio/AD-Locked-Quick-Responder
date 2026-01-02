@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    AD Locked - Quick Responder v2.2.8
+    AD Locked - Quick Responder v2.3.0
 .DESCRIPTION
     Provides a GUI to query all locked user accounts with auto-refresh, sound alerts, 
     TTS notifications, auto-unlock, filtering, and RDS source identification.
@@ -69,7 +69,7 @@ if (-not $script:useModernTTS) {
 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "AD Locked - Quick Responder v2.2.8"
+$form.Text = "AD Locked - Quick Responder v2.3.0"
 $form.Size = New-Object System.Drawing.Size(1250, 975)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
@@ -132,10 +132,20 @@ $form.Controls.Add($infoButton)
 
 $infoButton.Add_Click({
     $changelogText = @"
-AD Locked - Quick Responder v2.2.8
+AD Locked - Quick Responder v2.3.0
 
-=== v2.2.8 (Current) ===
-- Added elapsed time display above progress bar during queries (e.g., "Main DC... (00:05)")
+=== v2.3.0 (Current) ===
+- Detailed query progress display with batch info
+  * Shows "Searching locked users..." during initial search
+  * Shows "2/5 T-45s (00:12)" during batch processing
+    - 2/5 = current batch / total batches
+    - T-45s = timeout remaining for current batch
+    - (00:12) = total elapsed time
+- Progress display moved to left of progress bar in status panel
+- Scrollable changelog window
+
+=== v2.2.8 ===
+- Added elapsed time display during queries
 - Elapsed time updates every 2.5 seconds
 - Batch parallel query: Main DC query processes 5 users at a time (safer for server)
 - Added 60-second timeout per batch to prevent hanging
@@ -204,7 +214,34 @@ Filters:
 - Last Logon: All / 7 / 15 / 30 / 60 / 90 days
 - Search: Username / Display Name / Department / Email
 "@
-    [System.Windows.Forms.MessageBox]::Show($changelogText, "About & Changelog", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+    # Create scrollable changelog window
+    $changelogForm = New-Object System.Windows.Forms.Form
+    $changelogForm.Text = "About & Changelog"
+    $changelogForm.Size = New-Object System.Drawing.Size(550, 500)
+    $changelogForm.StartPosition = "CenterParent"
+    $changelogForm.FormBorderStyle = "FixedDialog"
+    $changelogForm.MaximizeBox = $false
+    $changelogForm.MinimizeBox = $false
+
+    $textBox = New-Object System.Windows.Forms.TextBox
+    $textBox.Multiline = $true
+    $textBox.ScrollBars = "Vertical"
+    $textBox.ReadOnly = $true
+    $textBox.Location = New-Object System.Drawing.Point(10, 10)
+    $textBox.Size = New-Object System.Drawing.Size(515, 400)
+    $textBox.Font = New-Object System.Drawing.Font("Consolas", 9)
+    $textBox.Text = $changelogText
+    $changelogForm.Controls.Add($textBox)
+
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = "OK"
+    $okButton.Location = New-Object System.Drawing.Point(225, 420)
+    $okButton.Size = New-Object System.Drawing.Size(80, 30)
+    $okButton.Add_Click({ $changelogForm.Close() })
+    $changelogForm.Controls.Add($okButton)
+    $changelogForm.AcceptButton = $okButton
+
+    $changelogForm.ShowDialog()
 })
 
 # Separator
