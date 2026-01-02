@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AD Locked - Quick Responder v2.1.2 is a PowerShell-based Windows Forms GUI application for IT administrators to monitor and manage Active Directory locked user accounts. Built for Thundermist Health Center IT Team.
+AD Locked - Quick Responder v2.2.8 is a PowerShell-based Windows Forms GUI application for IT administrators to monitor and manage Active Directory locked user accounts. Built for Thundermist Health Center IT Team.
 
 **GitHub**: https://github.com/RockySoft-Studio/AD-Locked-Quick-Responder
 
@@ -145,11 +145,24 @@ This means "10 days" = any time within the last 10 calendar days.
 - `Get-ADDomain` - Get domain info
 - `Get-ADDomainController` - List all DCs
 - `Unlock-ADAccount` - Unlock user
-- `Get-WinEvent` - Query security logs (Event IDs 4740, 4625)
 
 ## Version History
 
-### v2.1.2 (Current)
+### v2.2.8 (Current)
+- Added elapsed time display during queries (e.g., "Querying Main DC... (00:05)")
+- Fixed: Elapsed time now updates every 0.5 seconds (was 5 seconds - too slow to notice)
+- Batch parallel query: Main DC query processes 5 users at a time (safer for server)
+- Added 60-second timeout per batch to prevent hanging
+- Batch must complete or terminate before next batch starts (prevents server overload)
+- Fixed: Single locked user now correctly detected (array conversion fix)
+- Added permission detection: Unlock controls disabled when user lacks privileges
+- Fixed: Windows 11 TTS now runs async in background (no more UI freeze)
+- Parallel DC queries - significantly faster "Query from All DCs"
+- Removed event log queries (Get-WinEvent) - simplified DC status display
+- Fixed: All queries now explicitly target PDC for consistent BadLogonCount
+- Unlock operations also target PDC for consistency
+
+### v2.1.2
 - Windows 11 Natural Voice TTS support (auto fallback to legacy on Win10)
 - Info button (i) for viewing changelog
 - Removed Stop button - use checkbox to stop auto-unlock

@@ -136,6 +136,7 @@ AD Locked - Quick Responder v2.2.8
 
 === v2.2.8 (Current) ===
 - Added elapsed time display during queries (e.g., "Querying Main DC... (00:05)")
+- Fixed: Elapsed time now updates every 0.5 seconds (was 5 seconds - too slow to notice)
 - Batch parallel query: Main DC query processes 5 users at a time (safer for server)
 - Added 60-second timeout per batch to prevent hanging
 - Batch must complete or terminate before next batch starts (prevents server overload)
@@ -719,7 +720,7 @@ $script:toolTip.ReshowDelay = 100
 $script:toolTip.AutoPopDelay = 5000
 
 $timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 5000
+$timer.Interval = 500  # Fast polling for responsive elapsed time display during queries
 
 $autoRefreshTimer = New-Object System.Windows.Forms.Timer
 
