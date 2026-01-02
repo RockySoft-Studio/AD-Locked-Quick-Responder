@@ -1273,6 +1273,7 @@ function Set-UIState {
     $queryLockoutSourceButton.Enabled = -not $IsQuerying
     $cancelButton.Enabled = $IsQuerying
     $progressBar.Visible = $IsQuerying
+    if ($IsQuerying) { $progressBar.BringToFront() }
     $queryStatusLabel.Visible = $IsQuerying
     if (-not $IsQuerying) { $queryStatusLabel.Text = "" }
     $form.Cursor = if ($IsQuerying) { [System.Windows.Forms.Cursors]::AppStarting } else { [System.Windows.Forms.Cursors]::Default }
