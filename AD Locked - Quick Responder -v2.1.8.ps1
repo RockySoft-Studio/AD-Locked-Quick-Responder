@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    AD Locked - Quick Responder v2.1.2
+    AD Locked - Quick Responder v2.1.8
 .DESCRIPTION
     Provides a GUI to query all locked user accounts with auto-refresh, sound alerts, 
     TTS notifications, auto-unlock, filtering, and RDS source identification.
@@ -69,7 +69,7 @@ if (-not $script:useModernTTS) {
 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "AD Locked - Quick Responder v2.1.2"
+$form.Text = "AD Locked - Quick Responder v2.1.8"
 $form.Size = New-Object System.Drawing.Size(1250, 975)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
@@ -132,9 +132,16 @@ $form.Controls.Add($infoButton)
 
 $infoButton.Add_Click({
     $changelogText = @"
-AD Locked - Quick Responder v2.1.2
+AD Locked - Quick Responder v2.1.8
 
-=== v2.1.2 (Current) ===
+=== v2.1.8 (Current) ===
+- Parallel DC queries - significantly faster "Query from All DCs"
+- Removed event log queries (Get-WinEvent) - simplified DC status display
+- Fixed: All queries now explicitly target PDC for consistent BadLogonCount
+- Fixed: Unlock operations now target PDC for consistency
+- Code cleanup and performance improvements
+
+=== v2.1.2 ===
 - Added Windows 11 Natural Voice TTS support (auto fallback to legacy on Win10)
 - Added Info button (i) for viewing changelog
 - Removed Stop button - use checkbox to stop auto-unlock
@@ -1067,9 +1074,10 @@ function Process-AutoUnlockQueue {
     
     # Process unlocks
     $unlockSuccess = @()
+    $pdc = (Get-ADDomain).PDCEmulator
     foreach ($username in $toUnlock) {
         try {
-            Unlock-ADAccount -Identity $username -ErrorAction Stop
+            Unlock-ADAccount -Identity $username -Server $pdc -ErrorAction Stop
             $displayName = $script:autoUnlockQueue[$username].DisplayName
             $script:autoUnlockQueue.Remove($username)
             $script:notifiedUpcoming.Remove($username)
@@ -1121,7 +1129,8 @@ function Unlock-SelectedUser {
     
     if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
         try {
-            Unlock-ADAccount -Identity $selectedUsername -ErrorAction Stop
+            $pdc = (Get-ADDomain).PDCEmulator
+            Unlock-ADAccount -Identity $selectedUsername -Server $pdc -ErrorAction Stop
             
             if ($script:autoUnlockQueue.ContainsKey($selectedUsername)) {
                 $script:autoUnlockQueue.Remove($selectedUsername)
@@ -1252,9 +1261,10 @@ function Get-LockedOutUsersAsync {
     [void]$script:powershell.AddScript({
         Import-Module ActiveDirectory -ErrorAction Stop
         $results = @()
-        $lockedAccounts = Search-ADAccount -LockedOut
+        $pdc = (Get-ADDomain).PDCEmulator
+        $lockedAccounts = Search-ADAccount -LockedOut -Server $pdc
         foreach ($account in $lockedAccounts) {
-            $user = Get-ADUser -Identity $account.DistinguishedName -Properties SamAccountName,DisplayName,EmailAddress,Department,Title,LockedOut,LockoutTime,BadLogonCount,LastBadPasswordAttempt,LastLogonDate,PasswordLastSet,Enabled,Description,DistinguishedName,WhenCreated
+            $user = Get-ADUser -Identity $account.DistinguishedName -Server $pdc -Properties SamAccountName,DisplayName,EmailAddress,Department,Title,LockedOut,LockoutTime,BadLogonCount,LastBadPasswordAttempt,LastLogonDate,PasswordLastSet,Enabled,Description,DistinguishedName,WhenCreated
             $lockoutTimeConverted = $null
             if ($user.LockoutTime -and $user.LockoutTime -gt 0) { $lockoutTimeConverted = [DateTime]::FromFileTime($user.LockoutTime) }
             $lockoutDuration = $null
@@ -1346,59 +1356,45 @@ function Get-LockoutSourceAsync {
     $script:powershell = [powershell]::Create()
     $script:powershell.Runspace = $script:runspace
     [void]$script:powershell.AddScript({
-        param($Username, $RDSServers)
+        param($Username)
         Import-Module ActiveDirectory -ErrorAction Stop
-        $output = @{ DCResults = @(); Events = @(); PDC = ""; Error = $null; RDSLockouts = @(); OtherLockouts = @(); Summary = @{ TotalEvents = 0; RDSCount = 0; OtherCount = 0 }; FailedLogons = @() }
+        $output = @{ DCResults = @(); Error = $null }
         try {
             $domainControllers = Get-ADDomainController -Filter * | Select-Object Name, HostName, Site
+
+            # Create RunspacePool for parallel DC queries
+            $runspacePool = [runspacefactory]::CreateRunspacePool(1, [Math]::Min($domainControllers.Count, 10))
+            $runspacePool.Open()
+
+            $jobs = @()
             foreach ($dc in $domainControllers) {
-                try {
-                    $user = Get-ADUser -Identity $Username -Server $dc.HostName -Properties LockedOut,LockoutTime,BadLogonCount,LastBadPasswordAttempt
-                    $lockoutTimeConverted = $null
-                    if ($user.LockoutTime -and $user.LockoutTime -gt 0) { $lockoutTimeConverted = [DateTime]::FromFileTime($user.LockoutTime) }
-                    $output.DCResults += [PSCustomObject]@{ DCName = $dc.Name; DCHostName = $dc.HostName; Site = $dc.Site; LockedOut = $user.LockedOut; LockoutTime = $lockoutTimeConverted; BadLogonCount = $user.BadLogonCount; LastBadPasswordAttempt = $user.LastBadPasswordAttempt; Error = $null }
-                } catch {
-                    $output.DCResults += [PSCustomObject]@{ DCName = $dc.Name; DCHostName = $dc.HostName; Site = $dc.Site; LockedOut = "Query Failed"; LockoutTime = $null; BadLogonCount = "N/A"; LastBadPasswordAttempt = $null; Error = $_.Exception.Message }
-                }
+                $ps = [powershell]::Create()
+                $ps.RunspacePool = $runspacePool
+                [void]$ps.AddScript({
+                    param($DCName, $DCHostName, $Site, $Username)
+                    Import-Module ActiveDirectory -ErrorAction Stop
+                    try {
+                        $user = Get-ADUser -Identity $Username -Server $DCHostName -Properties LockedOut,LockoutTime,BadLogonCount,LastBadPasswordAttempt
+                        $lockoutTimeConverted = $null
+                        if ($user.LockoutTime -and $user.LockoutTime -gt 0) { $lockoutTimeConverted = [DateTime]::FromFileTime($user.LockoutTime) }
+                        [PSCustomObject]@{ DCName = $DCName; DCHostName = $DCHostName; Site = $Site; LockedOut = $user.LockedOut; LockoutTime = $lockoutTimeConverted; BadLogonCount = $user.BadLogonCount; LastBadPasswordAttempt = $user.LastBadPasswordAttempt; Error = $null }
+                    } catch {
+                        [PSCustomObject]@{ DCName = $DCName; DCHostName = $DCHostName; Site = $Site; LockedOut = "Query Failed"; LockoutTime = $null; BadLogonCount = "N/A"; LastBadPasswordAttempt = $null; Error = $_.Exception.Message }
+                    }
+                }).AddArgument($dc.Name).AddArgument($dc.HostName).AddArgument($dc.Site).AddArgument($Username)
+                $jobs += @{ PowerShell = $ps; Handle = $ps.BeginInvoke() }
             }
-            try {
-                $pdc = (Get-ADDomain).PDCEmulator
-                $output.PDC = $pdc
-                $lockoutEvents = Get-WinEvent -ComputerName $pdc -FilterHashtable @{ LogName = 'Security'; Id = 4740 } -MaxEvents 200 -ErrorAction SilentlyContinue | Where-Object { $_.Properties[0].Value -eq $Username }
-                foreach ($event in $lockoutEvents | Select-Object -First 20) {
-                    $sourceComputer = $event.Properties[1].Value
-                    $sourceComputerUpper = $sourceComputer.ToUpper()
-                    $sourceType = "Unknown"; $isRDS = $false
-                    foreach ($rds in $RDSServers) { if ($sourceComputerUpper -like "*$($rds.ToUpper())*") { $sourceType = "RDS"; $isRDS = $true; break } }
-                    if (-not $isRDS -and $sourceComputerUpper -match '(RDS|RDP|TERM|TS|REMOTE|GATEWAY|RDGW|RDSH|RDCB|VDI|CITRIX|XEN)') { $sourceType = "RDS (Inferred)"; $isRDS = $true }
-                    if (-not $isRDS -and $sourceComputer) {
-                        try {
-                            $computer = Get-ADComputer -Identity $sourceComputer -Properties OperatingSystem, Description -ErrorAction SilentlyContinue
-                            if ($computer) {
-                                if ($computer.OperatingSystem -match 'Server' -or $computer.Description -match '(RDS|Remote|Terminal)') { $sourceType = "Server" }
-                                if ($computer.Description -match '(RDS|Remote|Terminal)') { $sourceType = "RDS (Description Match)"; $isRDS = $true }
-                                elseif ($computer.OperatingSystem -match 'Windows 10|Windows 11') { $sourceType = "Workstation" }
-                            }
-                        } catch { }
-                    }
-                    if (-not $isRDS -and $sourceType -eq "Unknown") { $sourceType = "Other/Workstation" }
-                    $eventInfo = [PSCustomObject]@{ TimeCreated = $event.TimeCreated; SourceComputer = $sourceComputer; SourceType = $sourceType; IsRDS = $isRDS }
-                    $output.Events += $eventInfo
-                    if ($isRDS) { $output.RDSLockouts += $eventInfo; $output.Summary.RDSCount++ } else { $output.OtherLockouts += $eventInfo; $output.Summary.OtherCount++ }
-                    $output.Summary.TotalEvents++
-                }
-                try {
-                    $failedLogonEvents = Get-WinEvent -ComputerName $pdc -FilterHashtable @{ LogName = 'Security'; Id = 4625 } -MaxEvents 500 -ErrorAction SilentlyContinue | Where-Object { $_.Properties[5].Value -eq $Username } | Select-Object -First 20
-                    foreach ($event in $failedLogonEvents) {
-                        $logonType = $event.Properties[10].Value
-                        $logonTypeDesc = switch ($logonType) { 2 { "Interactive" }; 3 { "Network" }; 7 { "Unlock" }; 10 { "Remote Interactive (RDP)" }; 11 { "Cached Interactive" }; default { "Type $logonType" } }
-                        $output.FailedLogons += [PSCustomObject]@{ TimeCreated = $event.TimeCreated; WorkstationName = $event.Properties[13].Value; IPAddress = $event.Properties[19].Value; LogonType = $logonTypeDesc; IsRDP = ($logonType -eq 10) }
-                    }
-                } catch { }
-            } catch { $output.EventError = $_.Exception.Message }
+
+            # Wait for all jobs and collect results
+            foreach ($job in $jobs) {
+                $output.DCResults += $job.PowerShell.EndInvoke($job.Handle)
+                $job.PowerShell.Dispose()
+            }
+            $runspacePool.Close()
+            $runspacePool.Dispose()
         } catch { $output.Error = $_.Exception.Message }
         return $output
-    }).AddArgument($Username).AddArgument(@("RDS", "RDGW", "RDSH", "RDCB", "TERM", "REMOTE"))
+    }).AddArgument($Username)
     $script:asyncResult = $script:powershell.BeginInvoke()
     $script:queryUsername = $Username
     $timer.Tag = "LockoutSource"
@@ -1469,29 +1465,17 @@ $timer.Add_Tick({
                 "LockoutSource" {
                     if ($script:cancelRequested) { Update-Status "Cancelled" "Orange"; $detailTextBox.Text = "Query cancelled" }
                     else {
-                        $resultText = "Lockout Source Analysis for '$($script:queryUsername)'`r`n" + ("=" * 80) + "`r`n`r`n"
-                        if ($result.Summary.TotalEvents -gt 0) {
-                            $resultText += "[LOCKOUT SOURCE SUMMARY]`r`n" + ("-" * 40) + "`r`n"
-                            $resultText += "Total Lockout Events: $($result.Summary.TotalEvents)`r`n"
-                            $rdsPercent = [math]::Round(($result.Summary.RDSCount / $result.Summary.TotalEvents) * 100, 1)
-                            $otherPercent = [math]::Round(($result.Summary.OtherCount / $result.Summary.TotalEvents) * 100, 1)
-                            $resultText += "From RDS Systems: $($result.Summary.RDSCount) ($rdsPercent%)`r`n"
-                            $resultText += "From Other Systems: $($result.Summary.OtherCount) ($otherPercent%)`r`n`r`n"
+                        $resultText = "DC Status for '$($script:queryUsername)'`r`n" + ("=" * 60) + "`r`n`r`n"
+                        $dcCount = ($result.DCResults | Measure-Object).Count
+                        $lockedCount = ($result.DCResults | Where-Object { $_.LockedOut -eq $true } | Measure-Object).Count
+                        $resultText += "Queried $dcCount DCs | Locked on $lockedCount DC(s)`r`n`r`n"
+                        foreach ($r in $result.DCResults) {
+                            $lockTimeStr = if ($r.LockoutTime) { $r.LockoutTime.ToString('MM/dd HH:mm:ss') } else { "-" }
+                            $lastBadStr = if ($r.LastBadPasswordAttempt) { $r.LastBadPasswordAttempt.ToString('MM/dd HH:mm:ss') } else { "-" }
+                            $resultText += "DC: $($r.DCName.PadRight(15)) | Locked: $($r.LockedOut.ToString().PadRight(5)) | BadLogon: $($r.BadLogonCount.ToString().PadRight(3)) | LockTime: $lockTimeStr | LastBad: $lastBadStr`r`n"
                         }
-                        if ($result.RDSLockouts.Count -gt 0) {
-                            $resultText += "[RDS SYSTEM LOCKOUT EVENTS]`r`n" + ("-" * 40) + "`r`n"
-                            foreach ($event in $result.RDSLockouts) { $resultText += "Time: $($event.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))  |  Source: $($event.SourceComputer)  |  Type: $($event.SourceType)`r`n" }
-                            $resultText += "`r`n"
-                        }
-                        if ($result.OtherLockouts.Count -gt 0) {
-                            $resultText += "[OTHER SYSTEM LOCKOUT EVENTS]`r`n" + ("-" * 40) + "`r`n"
-                            foreach ($event in $result.OtherLockouts) { $resultText += "Time: $($event.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'))  |  Source: $($event.SourceComputer)  |  Type: $($event.SourceType)`r`n" }
-                            $resultText += "`r`n"
-                        }
-                        $resultText += "[DOMAIN CONTROLLER STATUS]`r`n" + ("-" * 40) + "`r`n"
-                        foreach ($r in $result.DCResults) { $resultText += "DC: $($r.DCName) | Locked: $($r.LockedOut) | Bad Logon Count: $($r.BadLogonCount)`r`n" }
                         $detailTextBox.Text = $resultText
-                        Update-Status "DC query completed" "Green"
+                        Update-Status "Queried $dcCount DCs" "Green"
                     }
                     Set-UIState -IsQuerying $false
                 }
@@ -1718,15 +1702,7 @@ $queryLockoutSourceButton.Add_Click({
         return
     }
     $username = $dataGridView.SelectedRows[0].Cells["Username"].Value
-    $result = [System.Windows.Forms.MessageBox]::Show(
-        "This operation will query all Domain Controllers for lockout source of user '$username' and may be SLOW.`n`nDo you want to continue?",
-        "Warning - Slow Operation",
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Warning
-    )
-    if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
-        Get-LockoutSourceAsync -Username $username
-    }
+    Get-LockoutSourceAsync -Username $username
 })
 $unlockMenuItem.Add_Click({ Unlock-SelectedUser })
 $cancelButton.Add_Click({ $script:cancelRequested = $true; Update-Status "Cancelling..." "Orange"; Cleanup-AsyncResources; Set-UIState -IsQuerying $false })
@@ -1757,15 +1733,7 @@ $queryLockoutSourceMenuItem.Add_Click({
         return
     }
     $username = $dataGridView.SelectedRows[0].Cells["Username"].Value
-    $result = [System.Windows.Forms.MessageBox]::Show(
-        "This operation will query all Domain Controllers for lockout source of user '$username' and may be SLOW.`n`nDo you want to continue?",
-        "Warning - Slow Operation",
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Warning
-    )
-    if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
-        Get-LockoutSourceAsync -Username $username
-    }
+    Get-LockoutSourceAsync -Username $username
 })
 
 $searchBox.Add_TextChanged({ Search-Users })
