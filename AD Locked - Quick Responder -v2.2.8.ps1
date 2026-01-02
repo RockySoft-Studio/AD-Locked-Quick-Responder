@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    AD Locked - Quick Responder v2.2.1
+    AD Locked - Quick Responder v2.2.8
 .DESCRIPTION
     Provides a GUI to query all locked user accounts with auto-refresh, sound alerts, 
     TTS notifications, auto-unlock, filtering, and RDS source identification.
@@ -69,7 +69,7 @@ if (-not $script:useModernTTS) {
 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "AD Locked - Quick Responder v2.2.1"
+$form.Text = "AD Locked - Quick Responder v2.2.8"
 $form.Size = New-Object System.Drawing.Size(1250, 975)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
@@ -132,13 +132,15 @@ $form.Controls.Add($infoButton)
 
 $infoButton.Add_Click({
     $changelogText = @"
-AD Locked - Quick Responder v2.2.1
+AD Locked - Quick Responder v2.2.8
 
-=== v2.2.1 (Current) ===
-- Added permission detection: Unlock controls disabled with tooltip when user lacks privileges
-- Status bar shows warning when unlock functions are unavailable
+=== v2.2.8 (Current) ===
+- Batch parallel query: Main DC query now processes 5 users at a time (safer for server)
+- Added 60-second timeout per batch to prevent hanging
+- Batch must complete or terminate before next batch starts (prevents server overload)
+- Fixed: Single locked user now correctly detected (array conversion fix)
+- Added permission detection: Unlock controls disabled when user lacks privileges
 - Fixed: Windows 11 TTS now runs async in background (no more UI freeze)
-- Optimized: Main DC query uses single Get-ADUser call instead of multiple queries
 - Parallel DC queries - significantly faster "Query from All DCs"
 - Removed event log queries (Get-WinEvent) - simplified DC status display
 - Fixed: All queries now explicitly target PDC for consistent BadLogonCount
@@ -1358,8 +1360,49 @@ function Get-LockedOutUsersAsync {
     [void]$script:powershell.AddScript({
         Import-Module ActiveDirectory -ErrorAction Stop
         $pdc = (Get-ADDomain).PDCEmulator
-        # Single query to get all locked users with all properties
-        $lockedUsers = Get-ADUser -Filter {LockedOut -eq $true} -Server $pdc -Properties SamAccountName,DisplayName,EmailAddress,Department,Title,LockedOut,LockoutTime,BadLogonCount,LastBadPasswordAttempt,LastLogonDate,PasswordLastSet,Enabled,Description,DistinguishedName,WhenCreated
+        # Use Search-ADAccount for reliable lockout detection, then batch parallel get properties (5 at a time)
+        $lockedSamNames = @(Search-ADAccount -LockedOut -Server $pdc | Select-Object -ExpandProperty SamAccountName)
+        $lockedUsers = @()
+        if ($lockedSamNames.Count -gt 0) {
+            $batchSize = 5
+            for ($i = 0; $i -lt $lockedSamNames.Count; $i += $batchSize) {
+                $batch = $lockedSamNames[$i..([Math]::Min($i + $batchSize - 1, $lockedSamNames.Count - 1))]
+                $pool = [runspacefactory]::CreateRunspacePool(1, $batch.Count)
+                $pool.Open()
+                $jobs = @()
+                foreach ($sam in $batch) {
+                    $ps = [powershell]::Create()
+                    $ps.RunspacePool = $pool
+                    [void]$ps.AddScript({
+                        param($SamName, $Server)
+                        Import-Module ActiveDirectory -ErrorAction Stop
+                        Get-ADUser -Identity $SamName -Server $Server -Properties SamAccountName,DisplayName,EmailAddress,Department,Title,LockedOut,LockoutTime,BadLogonCount,LastBadPasswordAttempt,LastLogonDate,PasswordLastSet,Enabled,Description,DistinguishedName,WhenCreated
+                    }).AddArgument($sam).AddArgument($pdc)
+                    $jobs += @{ PowerShell = $ps; Handle = $ps.BeginInvoke() }
+                }
+                # Wait for batch with timeout (60 sec per batch) - must complete or terminate before next batch
+                $timeout = [DateTime]::Now.AddSeconds(60)
+                $allCompleted = $false
+                while ([DateTime]::Now -lt $timeout) {
+                    $allCompleted = ($jobs | Where-Object { -not $_.Handle.IsCompleted }).Count -eq 0
+                    if ($allCompleted) { break }
+                    Start-Sleep -Milliseconds 100
+                }
+                # Collect results from completed jobs
+                foreach ($job in $jobs) {
+                    try {
+                        if ($job.Handle.IsCompleted) {
+                            $lockedUsers += $job.PowerShell.EndInvoke($job.Handle)
+                        } else {
+                            $job.PowerShell.Stop()
+                        }
+                    } catch { }
+                    $job.PowerShell.Dispose()
+                }
+                $pool.Close()
+                $pool.Dispose()
+            }
+        }
         $results = @()
         foreach ($user in $lockedUsers) {
             $lockoutTimeConverted = $null
