@@ -517,16 +517,16 @@ $progressBar.MarqueeAnimationSpeed = 30
 $progressBar.Visible = $false
 $domainPanel.Controls.Add($progressBar)
 
-# Query status label - shows elapsed time during queries, positioned above domainPanel
+# Query status label - shows elapsed time during queries, positioned left of progress bar
 $queryStatusLabel = New-Object System.Windows.Forms.Label
 $queryStatusLabel.Text = ""
-$queryStatusLabel.Location = New-Object System.Drawing.Point(900, 888)
-$queryStatusLabel.Size = New-Object System.Drawing.Size(315, 18)
+$queryStatusLabel.Location = New-Object System.Drawing.Point(860, 5)
+$queryStatusLabel.Size = New-Object System.Drawing.Size(155, 18)
 $queryStatusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
 $queryStatusLabel.ForeColor = [System.Drawing.Color]::DarkOrange
 $queryStatusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $queryStatusLabel.Visible = $false
-$form.Controls.Add($queryStatusLabel)
+$domainPanel.Controls.Add($queryStatusLabel)
 
 # Separator above Locked Users
 $separator4 = New-Object System.Windows.Forms.Label
