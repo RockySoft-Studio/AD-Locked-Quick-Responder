@@ -137,11 +137,13 @@ AD Locked - Quick Responder v2.2.1
 === v2.2.1 (Current) ===
 - Added permission detection: Unlock controls disabled with tooltip when user lacks privileges
 - Status bar shows warning when unlock functions are unavailable
+- Fixed: Windows 11 TTS now runs async in background (no more UI freeze)
+- Optimized: Main DC query uses single Get-ADUser call instead of multiple queries
 - Parallel DC queries - significantly faster "Query from All DCs"
 - Removed event log queries (Get-WinEvent) - simplified DC status display
 - Fixed: All queries now explicitly target PDC for consistent BadLogonCount
 - Fixed: Unlock operations now target PDC for consistency
-- Removed slow operation warning for single-user DC query (no longer needed)
+- UI: Unlock button changed to green color
 
 === v2.1.2 ===
 - Added Windows 11 Natural Voice TTS support (auto fallback to legacy on Win10)
@@ -654,7 +656,7 @@ $unlockButton = New-Object System.Windows.Forms.Button
 $unlockButton.Text = "Unlock This User"
 $unlockButton.Size = New-Object System.Drawing.Size(120, 25)
 $unlockButton.Location = New-Object System.Drawing.Point(20, 623)
-$unlockButton.BackColor = [System.Drawing.Color]::FromArgb(200, 80, 0)
+$unlockButton.BackColor = [System.Drawing.Color]::FromArgb(0, 150, 0)
 $unlockButton.ForeColor = [System.Drawing.Color]::White
 $unlockButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
 $unlockButton.Font = New-Object System.Drawing.Font("Segoe UI", 8)
@@ -814,13 +816,31 @@ function Speak-Notification {
         $ttsLogTextBox.ScrollToCaret()
     } catch { }
 
-    # Use modern TTS if available
+    # Use modern TTS if available (run in background to avoid blocking UI)
     if ($script:useModernTTS -and $script:modernSynth -and $script:mediaPlayer) {
         try {
-            $stream = $script:modernSynth.SynthesizeTextToStreamAsync($Message).GetAwaiter().GetResult()
-            $mediaSource = [Windows.Media.Core.MediaSource]::CreateFromStream($stream, $stream.ContentType)
-            $script:mediaPlayer.Source = $mediaSource
-            $script:mediaPlayer.Play()
+            # Run TTS synthesis in background thread
+            $ttsRunspace = [runspacefactory]::CreateRunspace()
+            $ttsRunspace.ApartmentState = "STA"
+            $ttsRunspace.Open()
+            $ttsRunspace.SessionStateProxy.SetVariable("modernSynth", $script:modernSynth)
+            $ttsRunspace.SessionStateProxy.SetVariable("mediaPlayer", $script:mediaPlayer)
+            $ttsRunspace.SessionStateProxy.SetVariable("message", $Message)
+
+            $ttsPowerShell = [powershell]::Create()
+            $ttsPowerShell.Runspace = $ttsRunspace
+            [void]$ttsPowerShell.AddScript({
+                param($synth, $player, $msg)
+                try {
+                    $stream = $synth.SynthesizeTextToStreamAsync($msg).GetAwaiter().GetResult()
+                    $mediaSource = [Windows.Media.Core.MediaSource]::CreateFromStream($stream, $stream.ContentType)
+                    $player.Source = $mediaSource
+                    $player.Play()
+                } catch { }
+            }).AddArgument($script:modernSynth).AddArgument($script:mediaPlayer).AddArgument($Message)
+
+            # Fire and forget - don't wait for completion
+            $ttsPowerShell.BeginInvoke() | Out-Null
         } catch {
             Write-Host "Modern TTS Error: $_"
         }
@@ -943,7 +963,7 @@ function Set-UnlockControlsState {
     if ($script:hasUnlockPermission) {
         $unlockButton.Enabled = $true
         $unlockMenuItem.Enabled = $true
-        $unlockButton.BackColor = [System.Drawing.Color]::FromArgb(200, 80, 0)
+        $unlockButton.BackColor = [System.Drawing.Color]::FromArgb(0, 150, 0)
         $script:toolTip.SetToolTip($unlockButton, "")
     } else {
         $unlockButton.Enabled = $false
@@ -1337,11 +1357,11 @@ function Get-LockedOutUsersAsync {
     $script:powershell.Runspace = $script:runspace
     [void]$script:powershell.AddScript({
         Import-Module ActiveDirectory -ErrorAction Stop
-        $results = @()
         $pdc = (Get-ADDomain).PDCEmulator
-        $lockedAccounts = Search-ADAccount -LockedOut -Server $pdc
-        foreach ($account in $lockedAccounts) {
-            $user = Get-ADUser -Identity $account.DistinguishedName -Server $pdc -Properties SamAccountName,DisplayName,EmailAddress,Department,Title,LockedOut,LockoutTime,BadLogonCount,LastBadPasswordAttempt,LastLogonDate,PasswordLastSet,Enabled,Description,DistinguishedName,WhenCreated
+        # Single query to get all locked users with all properties
+        $lockedUsers = Get-ADUser -Filter {LockedOut -eq $true} -Server $pdc -Properties SamAccountName,DisplayName,EmailAddress,Department,Title,LockedOut,LockoutTime,BadLogonCount,LastBadPasswordAttempt,LastLogonDate,PasswordLastSet,Enabled,Description,DistinguishedName,WhenCreated
+        $results = @()
+        foreach ($user in $lockedUsers) {
             $lockoutTimeConverted = $null
             if ($user.LockoutTime -and $user.LockoutTime -gt 0) { $lockoutTimeConverted = [DateTime]::FromFileTime($user.LockoutTime) }
             $lockoutDuration = $null
