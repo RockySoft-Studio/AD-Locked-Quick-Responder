@@ -135,7 +135,8 @@ $infoButton.Add_Click({
 AD Locked - Quick Responder v2.2.8
 
 === v2.2.8 (Current) ===
-- Batch parallel query: Main DC query now processes 5 users at a time (safer for server)
+- Added elapsed time display during queries (e.g., "Querying Main DC... (00:05)")
+- Batch parallel query: Main DC query processes 5 users at a time (safer for server)
 - Added 60-second timeout per batch to prevent hanging
 - Batch must complete or terminate before next batch starts (prevents server overload)
 - Fixed: Single locked user now correctly detected (array conversion fix)
@@ -709,6 +710,7 @@ $script:autoUnlockQueue = @{}
 $script:notifiedUpcoming = @{}
 $script:dcDataLoaded = $false
 $script:hasUnlockPermission = $false
+$script:queryStartTime = $null
 
 # ToolTip for permission warnings
 $script:toolTip = New-Object System.Windows.Forms.ToolTip
@@ -1346,6 +1348,7 @@ function Get-DomainInfoAsync {
 
 function Get-LockedOutUsersAsync {
     Set-UIState -IsQuerying $true
+    $script:queryStartTime = Get-Date
     Update-Status "Querying Main DC..." "Orange"
     $script:cancelRequested = $false
     
@@ -1430,6 +1433,7 @@ function Get-LockedOutUsersAsync {
 
 function Get-LockedOutUsersFromAllDCsAsync {
     Set-UIState -IsQuerying $true
+    $script:queryStartTime = Get-Date
     Update-Status "Querying All DCs for locked users..." "Orange"
     $script:cancelRequested = $false
 
@@ -1484,11 +1488,12 @@ function Get-LockoutSourceAsync {
         return
     }
     Set-UIState -IsQuerying $true
+    $script:queryStartTime = Get-Date
     Update-Status "Querying All DCs..." "Orange"
     $script:cancelRequested = $false
-    
+
     Cleanup-AsyncResources
-    
+
     $script:runspace = [runspacefactory]::CreateRunspace()
     $script:runspace.ApartmentState = "STA"
     $script:runspace.ThreadOptions = "ReuseThread"
@@ -1544,7 +1549,20 @@ function Get-LockoutSourceAsync {
 $timer.Add_Tick({
     if ($script:isClosing) { $timer.Stop(); return }
     if ($null -eq $script:asyncResult) { return }
-    
+
+    # Show elapsed time while query is running
+    if (-not $script:asyncResult.IsCompleted -and $script:queryStartTime) {
+        $elapsed = (Get-Date) - $script:queryStartTime
+        $elapsedStr = "{0:D2}:{1:D2}" -f [int]$elapsed.TotalMinutes, $elapsed.Seconds
+        $statusText = switch ($timer.Tag) {
+            "LockedUsers" { "Querying Main DC... ($elapsedStr)" }
+            "LockedUsersAllDCs" { "Querying All DCs... ($elapsedStr)" }
+            "LockoutSource" { "Querying DC status... ($elapsedStr)" }
+            default { "Processing... ($elapsedStr)" }
+        }
+        Update-Status $statusText "Orange"
+    }
+
     if ($script:asyncResult.IsCompleted) {
         $timer.Stop()
         try {
